@@ -3,11 +3,64 @@ const traverse = require('@babel/traverse').default;
 const generator = require("@babel/generator").default;
 const fs = require("fs");
 const t = require("@babel/types");
+// let jsFile = fs.readFileSync("./raw.js","utf-8");
+// ast = parser.parse(jsFile);
+// let   decode_JS = generator(ast,{minified:true,jsescOption:{minified: true}}).code
+// ast = parser.parse(decode_JS);//
+const ivm = require('isolated-vm')
+const isolate = new ivm.Isolate({ memoryLimit: 32 });
 
 /*
     解substrate混淆
 
 */
+
+function IsArrayAllStringLiteral(arr){
+    let isAllString = true
+    if(!arr.elements){
+        return false
+    }
+    if(!Array.isArray(arr.elements.slice(0))){
+        return false
+    }
+    if(arr.elements.length < 10){
+        return  false
+    }
+    for(let i = 0; i < arr.elements.length ;i++){
+        let _item = arr.elements[i]
+        try{
+            if(_item.type !== "StringLiteral"){
+                return false
+            }
+        }catch{
+
+        }
+    }
+
+    return isAllString
+
+}
+function IsBelongDecryptoFunc(_path){
+    let startVar = _path.node.init.name
+    let chains = [startVar]
+    while(true){
+        try{
+            let c_node = _path.scope.getBinding(startVar)
+            if( c_node.path.node.type === "VariableDeclarator"){
+                startVar = c_node.path.node.init.name;
+                chains.push(startVar)
+            }else{
+                break
+            }
+        }
+        catch (e) {
+            break
+        }
+
+
+    }
+    return chains
+}
 function get_mother_key(ast, mother_key){
     let fragment_node = ast.program.body[0].expression.callee.body.body.slice(0,-2);
     let new_node_list = []
@@ -56,8 +109,11 @@ function get_mother_key(ast, mother_key){
 }
 
 function crack(ast){
+    let ob_context = isolate.createContextSync()
     var mother_key = []
     let mother_key_map = get_mother_key(ast, mother_key)
+    let ob_context_script = ''
+    let ob_deob_func_name = []
     traverse(ast, {
         VariableDeclarator(path){
             try{
@@ -68,9 +124,59 @@ function crack(ast){
             catch (e){
 
             }
+            if(path.node.init
+                && path.node.init.type === "ArrayExpression"
+                && IsArrayAllStringLiteral( path.node.init)){
+                let ob_args_func = path.getFunctionParent().node.id.name
+                path.getFunctionParent().scope.getBinding(ob_args_func).referencePaths.forEach(
+                    (nodePath2) => {
+                        let _code = ''
+                        if(nodePath2.listKey === "arguments"){
+                            _code = `!${generator(nodePath2.parent).code}`
 
-        }
+                        }else{
+                            _code = generator(nodePath2.parentPath.getFunctionParent().node).code
+                            if(_code.includes('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=')){
+                                ob_deob_func_name.push(nodePath2.parentPath.getFunctionParent().node.id.name)
+                            }
+
+                        }
+                        ob_context_script += _code
+                        ob_context_script += '\n//#########\n'
+                    }
+                )
+
+
+            }
+        },
     });
+    // 执行ob混淆的上下文脚本
+    ob_context.evalSync(ob_context_script)
+    traverse(ast, {
+        VariableDeclarator(path){
+            if(path.node.init){
+                if(path.node.init.type === "Identifier"){
+                    let __cs = IsBelongDecryptoFunc(path)
+                    if(ob_deob_func_name.includes(__cs.slice(-1)[0])){
+                        let _ia_name = path.node.id.name;
+
+                        path.scope.getBinding(_ia_name).referencePaths.forEach(
+                            (nodePath2) =>{
+                                if(nodePath2.key ==="callee"){
+                                    let _args0 = nodePath2.parent.arguments[0].value
+                                    let newStr = ob_context.evalSync(`${ob_deob_func_name[0]}(${_args0})`)
+                                    let newNode = t.StringLiteral(newStr)
+                                    nodePath2.parentPath.replaceInline(newNode)
+                                }else if(nodePath2.key === "init"){
+                                    ob_deob_func_name.push(nodePath2.parent.id.name)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    })
     traverse(ast, {
         CallExpression(path){
             try{
@@ -93,6 +199,7 @@ function crack(ast){
 
         }
     });
+
     traverse(ast, {
         BinaryExpression(path){
             try{
@@ -131,14 +238,15 @@ function crack(ast){
 
         }
     });
-    let decode = generator(ast).code
+
+    // let decode = generator(ast).code
     // console.log(decode)
     // return decode
 }
 
 
 function cut(ast){
-    let moudle_name = ''
+    let moudle_map = {}
     traverse(
         ast,{
             CallExpression(path){
@@ -180,7 +288,7 @@ function cut(ast){
                     }
                     // 收集返回值
                     if(path.node.callee.property.value==="stop" && path.node.arguments[0].value==="interrogation"){
-                        debugger
+                        // debugger
                         let last_node = path.parentPath.parent.body.slice(-1)[0]
                         let token_vname = last_node.expression.arguments[0].name
                         let append_node = t.expressionStatement(
@@ -200,13 +308,26 @@ function cut(ast){
 
                 }
             },
-            AssignmentExpression(path){
-                try{
-                    if(path.node.left.name==="reese84" && path.node.operator==="="){
-                        moudle_name = path.node.right.name
+            ObjectProperty(path){
+                if(path.node.key
+                    && path.node.key.type === "NumericLiteral"
+                    && path.node.value.type === 'FunctionExpression'
+                ){
+                    let _code = generator(path.node.value).code
+                    if(_code.includes('window["reese84interrogato"')){
+                        moudle_map["interrogatorFactory"] = path.node.key.value;
+                    }else if(_code.includes('["timerFactory"] = function ()')){
+                        moudle_map["timerFactory"] = path.node.key.value;
+                    }else if(_code.includes('"hash": function')){
+                        moudle_map["hashFactory"] = path.node.key.value;
                     }
-                }catch (e){
-
+                }
+                if(path.node.key
+                    && path.node.key.type === "StringLiteral"
+                    && path.node.key.value === "aih"
+                    && path.node.value.type === 'StringLiteral'
+                ){
+                    moudle_map["aih"] = path.node.value.value
                 }
             }
 
@@ -214,27 +335,58 @@ function cut(ast){
     )
     traverse(
         ast, {
-            VariableDeclarator(path){
+            AssignmentExpression(path){
                 try{
-                    if(path.node.id.name === moudle_name && path.node.init.arguments[0].value===111){
+                    if(path.node.left.name === "reese84"){
                         //修改moudle
-                        path.node.init.arguments[0].value = 432
-                        let __name = path.node.init.callee.name
-                        //添加time
-                        let __time_node = t.assignmentExpression(
-                            "=", // Assignment operator
-                            t.memberExpression(
-                                t.identifier("window"), // Object: window
-                                t.identifier("__timer"), // Property: __timer
-                                false // Not computed
-                            ),
-                            t.callExpression(
-                                t.identifier(__name), // Callee: _0x318d19
-                                [t.numericLiteral(496)] // Arguments: [496]
-                            )
-                        );
-                        path.parentPath.parent.body.push(__time_node);
-                    }
+                        // if(path.node.init !== null){
+                            let reese_org = path.node.right.name;
+                            let moudle_name = path.scope.getBinding(reese_org).path.node.init.callee.name;
+                            path.scope.getBinding(reese_org).path.node.init.arguments[0].value = moudle_map['interrogatorFactory'];
+                            //添加time
+                            let __time_node = t.assignmentExpression(
+                                "=", // Assignment operator
+                                t.memberExpression(
+                                    t.identifier("window"), // Object: window
+                                    t.identifier("__timer"), // Property: __timer
+                                    false // Not computed
+                                ),
+                                t.callExpression(
+                                    t.identifier(moudle_name), // Callee: _0x318d19
+                                    [t.numericLiteral(moudle_map["timerFactory"])] // Arguments: [496]
+                                )
+                            );
+                            //添加hash
+                            let __hash_node = t.assignmentExpression(
+                                "=", // Assignment operator
+                                t.memberExpression(
+                                    t.identifier("window"), // Object: window
+                                    t.identifier("__hash"), // Property: __timer
+                                    false // Not computed
+                                ),
+                                t.callExpression(
+                                    t.identifier(moudle_name), // Callee: _0x318d19
+                                    [t.numericLiteral(moudle_map["hashFactory"])] // Arguments: [496]
+                                )
+                            );
+                            let aih_node = t.assignmentExpression(
+                                "=", // Assignment operator
+                                t.memberExpression(
+                                    t.identifier("window"), // Object: window
+                                    t.identifier("__aih"), // Property: __timer
+                                    false // Not computed
+                                ),
+                                t.StringLiteral(
+                                    moudle_map['aih']
+                                )
+                            );
+                            path.parentPath.parent.body.push(__time_node);
+                            path.parentPath.parent.body.push(__hash_node);
+                            path.parentPath.parent.body.push(aih_node);
+                        }
+
+
+                    // }
                 }catch (e) {
 
                 }
@@ -244,7 +396,9 @@ function cut(ast){
 
 }
 
+// crack(ast)
 // cut(ast)
+
 /*
     step1: 裁切第一个只执行的函数，并修改其中的settimeout函数和addEventLis
 */
